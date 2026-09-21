@@ -2,9 +2,6 @@
 name: Build Niri Custom DEB
 
 on:
-  push:
-    branches:
-      - custom-26.04
   workflow_dispatch:
 
 jobs:
@@ -62,19 +59,78 @@ jobs:
         run: |
           cargo build --release --locked
 
+      
       - name: Create DEB package
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           PKG="$GITHUB_WORKSPACE/pkg"
+
           mkdir -p "$PKG/DEBIAN"
           mkdir -p "$PKG/usr/bin"
+          mkdir -p "$PKG/usr/lib/systemd/user"
           mkdir -p "$PKG/usr/share/wayland-sessions"
 
+          # 1. Install custom Niri binary.
           install -m755 target/release/niri \
             "$PKG/usr/bin/niri-custom"
 
+          # 2. Create systemd user service.
+          cat > "$PKG/usr/lib/systemd/user/niri-custom.service" <<'EOF'
+          [Unit]
+          Description=Custom Niri Wayland compositor
+
+          BindsTo=graphical-session.target
+          Before=graphical-session.target
+
+          Wants=graphical-session-pre.target
+          After=graphical-session-pre.target
+
+          Wants=xdg-desktop-autostart.target
+          Before=xdg-desktop-autostart.target
+
+          [Service]
+          Slice=session.slice
+          Type=notify
+          ExecStart=/usr/bin/niri-custom --session
+          EOF
+
+          # 3. Create session launcher.
+          cat > "$PKG/usr/bin/niri-custom-session" <<'EOF'
+          #!/bin/sh
+
+          if systemctl --user -q is-active niri.service ||
+             systemctl --user -q is-active niri-custom.service; then
+              echo "A Niri session is already running."
+              exit 1
+          fi
+
+          systemctl --user reset-failed
+          systemctl --user import-environment
+
+          if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+              dbus-update-activation-environment --all
+          fi
+
+          systemctl --user --wait start niri-custom.service
+          status=$?
+
+          systemctl --user start --job-mode=replace-irreversibly niri-shutdown.target
+
+          systemctl --user unset-environment \
+              WAYLAND_DISPLAY \
+              DISPLAY \
+              XDG_SESSION_TYPE \
+              XDG_CURRENT_DESKTOP \
+              NIRI_SOCKET
+
+          exit "$status"
+          EOF
+
+          chmod 755 "$PKG/usr/bin/niri-custom-session"
+
+          # 4. Create GDM session entry.
           cat > "$PKG/usr/share/wayland-sessions/niri-custom.desktop" <<'EOF'
           [Desktop Entry]
           Name=Niri Custom
@@ -84,26 +140,41 @@ jobs:
           DesktopNames=niri
           EOF
 
-          cat > "$PKG/usr/bin/niri-custom-session" <<'EOF'
-          #!/bin/sh
-          exec /usr/bin/niri-custom --session
-          EOF
-
-          chmod +x "$PKG/usr/bin/niri-custom-session"
-
+          # 5. Create Debian package metadata.
           cat > "$PKG/DEBIAN/control" <<'EOF'
           Package: niri-custom
-          Version: 26.04+custom1
+          Version: 26.04+custom2
           Section: x11
           Priority: optional
           Architecture: amd64
           Maintainer: Custom Build <builder@example.invalid>
+          Depends: niri, dbus-user-session, systemd
           Description: Custom Niri Wayland compositor
-           Custom build of Niri 26.04.
+           Custom build of Niri 26.04 with modified Overview.
           EOF
 
+          # 6. Build DEB.
           dpkg-deb --build "$PKG" \
-            niri-custom_26.04+custom1_amd64.deb
+            niri-custom_26.04+custom2_amd64.deb
+
+          # 7. Inspect package.
+          dpkg-deb --info \
+            niri-custom_26.04+custom2_amd64.deb
+
+          dpkg-deb --contents \
+            niri-custom_26.04+custom2_amd64.deb
+
+      - name: Verify package contents
+        shell: bash
+        run: |
+          set -e
+
+          DEB="niri-custom_26.04+custom2_amd64.deb"
+
+          dpkg-deb --contents "$DEB" | grep 'usr/bin/niri-custom$'
+          dpkg-deb --contents "$DEB" | grep 'usr/bin/niri-custom-session$'
+          dpkg-deb --contents "$DEB" | grep 'usr/lib/systemd/user/niri-custom.service$'
+          dpkg-deb --contents "$DEB" | grep 'usr/share/wayland-sessions/niri-custom.desktop$'
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
