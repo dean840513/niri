@@ -4199,8 +4199,9 @@ impl<W: LayoutElement> Layout<W> {
                         let mon = &mut monitors[*active_monitor_idx];
                         let zoom = mon.overview_zoom();
                         // No point in trying to use the pointer position on the wrong output.
-                        let ws = &mon.workspaces[0];
-                        let ws_geo = mon.workspaces_render_geo().next().unwrap();
+                        let ws_idx = mon.active_workspace_idx;
+                        let ws = &mon.workspaces[ws_idx];
+                        let ws_geo = mon.workspaces_render_geo().nth(ws_idx).unwrap();
 
                         let position = if move_.is_floating {
                             InsertPosition::Floating
