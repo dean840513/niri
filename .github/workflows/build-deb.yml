@@ -1,0 +1,112 @@
+
+name: Build Niri Custom DEB
+
+on:
+  push:
+    branches:
+      - custom-26.04
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    container:
+      image: debian:trixie
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            git curl ca-certificates \
+            build-essential pkg-config \
+            libudev-dev libinput-dev \
+            libgbm-dev libxkbcommon-dev \
+            libdisplay-info-dev libseat-dev \
+            libpipewire-0.3-dev \
+            libpango1.0-dev \
+            libsystemd-dev \
+            libdbus-1-dev \
+            libegl-dev \
+            libgles-dev \
+            libwayland-dev \
+            libdrm-dev \
+            libx11-xcb-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-composite0-dev \
+            libxcb-dri3-dev \
+            libxcb-present-dev \
+            libxcb-sync-dev \
+            libxcb-xinput-dev \
+            libxcb-xkb-dev \
+            dpkg-dev
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          curl https://sh.rustup.rs -sSf | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build Niri
+        shell: bash
+        run: |
+          cargo build --release --locked
+
+      - name: Create DEB package
+        shell: bash
+        run: |
+          set -e
+
+          PKG="$GITHUB_WORKSPACE/pkg"
+          mkdir -p "$PKG/DEBIAN"
+          mkdir -p "$PKG/usr/bin"
+          mkdir -p "$PKG/usr/share/wayland-sessions"
+
+          install -m755 target/release/niri \
+            "$PKG/usr/bin/niri-custom"
+
+          cat > "$PKG/usr/share/wayland-sessions/niri-custom.desktop" <<'EOF'
+          [Desktop Entry]
+          Name=Niri Custom
+          Comment=Custom Niri Wayland Session
+          Exec=niri-custom-session
+          Type=Application
+          DesktopNames=niri
+          EOF
+
+          cat > "$PKG/usr/bin/niri-custom-session" <<'EOF'
+          #!/bin/sh
+          exec /usr/bin/niri-custom --session
+          EOF
+
+          chmod +x "$PKG/usr/bin/niri-custom-session"
+
+          cat > "$PKG/DEBIAN/control" <<'EOF'
+          Package: niri-custom
+          Version: 26.04+custom1
+          Section: x11
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Custom Build <builder@example.invalid>
+          Description: Custom Niri Wayland compositor
+           Custom build of Niri 26.04.
+          EOF
+
+          dpkg-deb --build "$PKG" \
+            niri-custom_26.04+custom1_amd64.deb
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: niri-custom-deb
+          path: "*.deb"
+          retention-days: 7
