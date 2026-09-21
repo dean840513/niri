@@ -43,6 +43,9 @@ jobs:
             libxcb-sync-dev \
             libxcb-xinput-dev \
             libxcb-xkb-dev \
+            libglib2.0-dev \
+            libpango1.0-dev \
+            libsystemd-dev \
             dpkg-dev
 
       - name: Checkout source
