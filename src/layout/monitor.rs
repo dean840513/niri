@@ -1376,6 +1376,12 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub(super) fn set_overview_progress(&mut self, progress: Option<&super::OverviewProgress>) {
+        if self.overview_open && progress.is_some() {
+            // A workspace switch has no visible destination in the single-workspace overview.
+            // Cancel an in-flight switch so gesture updates cannot move to a hidden workspace.
+            self.workspace_switch = None;
+        }
+
         let prev_render_idx = self.workspace_render_idx();
         self.overview_progress = progress.map(OverviewProgress::from);
         let new_render_idx = self.workspace_render_idx();
@@ -1484,7 +1490,17 @@ impl<W: LayoutElement> Monitor<W> {
             .to_physical_precise_round(scale)
             .to_logical(scale);
 
-        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
+        // The overview is a window overview for this monitor's active workspace, rather than a
+        // workspace switcher. Keep that workspace centered even if a workspace-switch animation
+        // happened to be in progress when the overview was opened. The other workspaces still
+        // retain their ordinary geometry so leaving the overview can restore the normal view
+        // without changing any workspace state.
+        let render_idx = if self.overview_progress.is_some() {
+            self.active_workspace_idx as f64
+        } else {
+            self.workspace_render_idx()
+        };
+        let first_ws_y = -render_idx * ws_height_with_gap;
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
         // Return position for one-past-last workspace too.
@@ -1508,9 +1524,16 @@ impl<W: LayoutElement> Monitor<W> {
         let output_geo = Rectangle::from_size(self.view_size);
 
         let geo = self.workspaces_render_geo();
-        zip(self.workspaces.iter(), geo)
+        zip(self.workspaces.iter().enumerate(), geo)
+            // In the overview, only expose the active workspace. Besides rendering, this iterator
+            // feeds pointer hit testing and interactive-move lookup, so filtering here prevents
+            // hidden workspaces from retaining interactive regions.
+            .filter(move |((idx, _ws), _geo)| {
+                self.overview_progress.is_none() || *idx == self.active_workspace_idx
+            })
             // Cull out workspaces outside the output.
-            .filter(move |(_ws, geo)| geo.intersection(output_geo).is_some())
+            .filter(move |((_idx, _ws), geo)| geo.intersection(output_geo).is_some())
+            .map(|((_idx, ws), geo)| (ws, geo))
     }
 
     pub fn workspaces_with_render_geo_idx(
@@ -1520,6 +1543,9 @@ impl<W: LayoutElement> Monitor<W> {
 
         let geo = self.workspaces_render_geo();
         zip(self.workspaces.iter().enumerate(), geo)
+            .filter(move |((idx, _ws), _geo)| {
+                self.overview_progress.is_none() || *idx == self.active_workspace_idx
+            })
             // Cull out workspaces outside the output.
             .filter(move |(_ws, geo)| geo.intersection(output_geo).is_some())
     }
@@ -1530,10 +1556,18 @@ impl<W: LayoutElement> Monitor<W> {
     ) -> impl Iterator<Item = (&mut Workspace<W>, Rectangle<f64, Logical>)> {
         let output_geo = Rectangle::from_size(self.view_size);
 
+        let overview_active_idx = self
+            .overview_progress
+            .as_ref()
+            .map(|_| self.active_workspace_idx);
         let geo = self.workspaces_render_geo();
-        zip(self.workspaces.iter_mut(), geo)
+        zip(self.workspaces.iter_mut().enumerate(), geo)
+            .filter(move |((idx, _ws), _geo)| {
+                overview_active_idx.is_none_or(|active| *idx == active)
+            })
             // Cull out workspaces outside the output.
-            .filter(move |(_ws, geo)| !cull || geo.intersection(output_geo).is_some())
+            .filter(move |((_idx, _ws), geo)| !cull || geo.intersection(output_geo).is_some())
+            .map(|((_idx, ws), geo)| (ws, geo))
     }
 
     pub fn workspace_under(
@@ -1588,6 +1622,15 @@ impl<W: LayoutElement> Monitor<W> {
         &self,
         pos_within_output: Point<f64, Logical>,
     ) -> (InsertWorkspace, Rectangle<f64, Logical>) {
+        if self.overview_progress.is_some() {
+            let ws = &self.workspaces[self.active_workspace_idx];
+            let geo = self
+                .workspaces_render_geo()
+                .nth(self.active_workspace_idx)
+                .unwrap();
+            return (InsertWorkspace::Existing(ws.id()), geo);
+        }
+
         let mut iter = self.workspaces_with_render_geo_idx();
 
         let dummy = Rectangle::default();
@@ -1780,6 +1823,10 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn workspace_switch_gesture_begin(&mut self, is_touchpad: bool) {
+        if self.overview_open {
+            return;
+        }
+
         let center_idx = self.active_workspace_idx;
         let current_idx = self.workspace_render_idx();
 
@@ -1798,35 +1845,7 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn dnd_scroll_gesture_begin(&mut self) {
-        if let Some(WorkspaceSwitch::Gesture(WorkspaceSwitchGesture {
-            dnd_last_event_time: Some(_),
-            ..
-        })) = &self.workspace_switch
-        {
-            // Already active.
-            return;
-        }
-
-        if !self.overview_open {
-            // This gesture is only for the overview.
-            return;
-        }
-
-        let center_idx = self.active_workspace_idx;
-        let current_idx = self.workspace_render_idx();
-
-        let gesture = WorkspaceSwitchGesture {
-            center_idx,
-            start_idx: current_idx,
-            current_idx,
-            animation: None,
-            tracker: SwipeTracker::new(),
-            is_touchpad: false,
-            is_clamped: false,
-            dnd_last_event_time: Some(self.clock.now_unadjusted()),
-            dnd_nonzero_start_time: None,
-        };
-        self.workspace_switch = Some(WorkspaceSwitch::Gesture(gesture));
+        // Hidden workspaces must not become drag-and-drop targets in the overview.
     }
 
     pub fn workspace_switch_gesture_update(
